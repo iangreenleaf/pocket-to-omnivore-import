@@ -1,48 +1,50 @@
 import "dotenv/config";
 import { gql, GraphQLClient } from "graphql-request";
-import { v4 as uuidv4 } from 'uuid';
+import { v4 as uuidv4 } from "uuid";
+import { Readable, Writable, pipeline } from "stream";
+import { finished } from "stream/promises";
+import { createObjectCsvWriter } from "csv-writer"
 
-const getArticleById = gql`
-  query GetSavedItemById($itemId: ID!) {
+const listArticles = gql`
+  query GetSavedItems(
+    $filter: SavedItemsFilter
+    $sort: SavedItemsSort
+    $pagination: PaginationInput
+  ) {
     user {
-      savedItemById(id: $itemId) {
-        ...SavedItemDetails
-        annotations {
-          highlights {
-            id
-            quote
-            patch
-            version
+      savedItems(filter: $filter, sort: $sort, pagination: $pagination) {
+        edges {
+          cursor
+          node {
+            url
             _createdAt
             _updatedAt
-            note {
-              text
-              _createdAt
-              _updatedAt
+            id
+            status
+            isFavorite
+            favoritedAt
+            isArchived
+            archivedAt
+            tags {
+              id
+              name
+            }
+            item {
+              ...ItemDetails
+              ... on Item {
+                article
+              }
             }
           }
         }
-        item {
-          ...ItemDetails
-          ... on Item {
-            article
-          }
+        pageInfo {
+          hasNextPage
+          hasPreviousPage
+          startCursor
+          endCursor
         }
+        totalCount
       }
-    }
-  }
-  fragment SavedItemDetails on SavedItem {
-    _createdAt
-    _updatedAt
-    id
-    status
-    isFavorite
-    favoritedAt
-    isArchived
-    archivedAt
-    tags {
-      id
-      name
     }
   }
   fragment ItemDetails on Item {
@@ -130,29 +132,106 @@ async function main() {
     },
   });
 
-  const response = await pocketClient.request(getArticleById, {
-    itemId: process.env.POCKET_ARTICLE_ID,
+  let pageInfo: {
+    hasNextPage: boolean,
+    hasPreviousPage: boolean,
+    startCursor: string,
+    endCursor: string
+  };
+  let currentPage: object[];
+
+  const getNextPage = () => {
+    return pocketClient.request(listArticles, {
+      filter: {
+        statuses: ["UNREAD"],
+      },
+      sort: {
+        sortBy: "CREATED_AT",
+        sortOrder: "DESC"
+      },
+      pagination: pageInfo ? {
+        after: pageInfo.endCursor
+      } : null
+    });
+  };
+
+  const readArticles = new Readable({
+    objectMode: true,
+    async read(_size) {
+      if (!pageInfo || pageInfo.hasNextPage && currentPage.length === 0) {
+        ({ user: { savedItems: { pageInfo, edges: currentPage }}} = await getNextPage());
+      }
+
+      if (currentPage.length > 0) {
+        this.push(currentPage.shift());
+      } else {
+        this.push(null);
+      }
+    }
   });
 
-  const savedItem = response.user.savedItemById.item;
+  const failedEntries: object[] = [];
 
-  const labels = response.user.savedItemById.tags.map((tag:string) => ({name: tag}));
+  //TODO figure out archived favorited etc
+  const writeToOmnivore = new Writable({
+    objectMode: true,
+    async write(article, _encoding, callback) {
+      const { node: { tags, _createdAt, item } } = article;
+      const labels = tags.map((tag:string) => ({name: tag}));
 
-  const savePageResponse = await omniClient.request(savePageMutation, {
-    input: {
-      url: savedItem.givenUrl,
-      clientRequestId: uuidv4(),
-      title: savedItem.title,
-      originalContent: savedItem.article,
-      savedAt: new Date(response.user.savedItemById.archivedAt * 1000),
-      publishedAt: new Date(savedItem.datePublished),
-      // The server barfs if sent an empty array, so work around that
-      labels: labels.length > 0 ? labels : null,
-      source: 'api',
-    },
+      console.log(`Saving "${item.title}" (${item.givenUrl})`);
+
+      await omniClient.request(savePageMutation, {
+        input: {
+          url: item.givenUrl,
+          clientRequestId: uuidv4(),
+          title: item.title,
+          originalContent: item.article,
+          savedAt: new Date(_createdAt * 1000),
+          publishedAt: new Date(item.datePublished),
+          // The server barfs if sent an empty array, so work around that
+          labels: labels.length > 0 ? labels : null,
+          source: 'api',
+        },
+      }).catch((error) => {
+        console.log("Failed!", error);
+        failedEntries.push({
+          url: item.givenUrl,
+          title: item.title,
+          tags: tags.join(","),
+          timestamp: _createdAt
+        });
+      });
+
+      callback(null);
+    }
   });
 
-  console.log(savePageResponse);
+  const handleErrors = () => {
+    if (failedEntries.length === 0) {
+      return;
+    }
+
+    const csvWriter = createObjectCsvWriter({
+      path: `error_${new Date().toJSON().slice(0, 10)}.csv`,
+      header: [
+        { id: 'url', title: 'URL' },
+        { id: 'title', title: 'Title' },
+        { id: 'tags', title: 'Tags' },
+        { id: 'timestamp', title: 'Timestamp' },
+      ]
+    });
+
+    csvWriter
+      .writeRecords(failedEntries)
+      .then(() => console.log('Errors written to CSV file.'));
+  };
+
+  readArticles.pipe(writeToOmnivore);
+  await finished(writeToOmnivore);
+
+  console.log("Import finished.");
+  handleErrors();
 }
 
 main();
