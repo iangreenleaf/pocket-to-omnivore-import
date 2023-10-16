@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { gql, GraphQLClient } from "graphql-request";
 import { v4 as uuidv4 } from "uuid";
-import { Readable, Writable, pipeline } from "stream";
+import { Readable, Writable } from "stream";
 import { finished } from "stream/promises";
 import { createObjectCsvWriter } from "csv-writer"
 
@@ -140,7 +140,22 @@ async function main() {
   };
   let currentPage: object[];
 
-  const getNextPage = () => {
+  type ListArticlesResponse = {
+    user: {
+      savedItems: {
+        pageInfo: {
+          hasNextPage: boolean,
+          hasPreviousPage: boolean,
+          startCursor: string,
+          endCursor: string
+        },
+        edges: object[],
+        totalCount: number
+      }
+    }
+  };
+
+  const getNextPage: () => Promise<ListArticlesResponse> = () => {
     return pocketClient.request(listArticles, {
       filter: {
         statuses: ["UNREAD", "ARCHIVED"],
