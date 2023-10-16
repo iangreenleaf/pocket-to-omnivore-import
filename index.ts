@@ -1,52 +1,107 @@
-import * as htmlparser2 from "htmlparser2";
-import { WritableStream } from "htmlparser2/lib/WritableStream";
-import { createObjectCsvWriter } from "csv-writer"
 import "dotenv/config";
-import fs from "fs";
 import { gql, GraphQLClient } from "graphql-request";
+import { v4 as uuidv4 } from "uuid";
+import { Readable, Writable, pipeline } from "stream";
 import { finished } from "stream/promises";
-import { v4 as uuidv4 } from 'uuid';
+import { createObjectCsvWriter } from "csv-writer"
 
-interface ImportItem {
-  url: string,
-  title: string,
-  tags: [string],
-  timestamp: string
-}
-
-const OMNIVORE_API_URL = "https://api-prod.omnivore.app/api/graphql";
-const POCKET_HTML_EXPORT_PATH = `${__dirname}/pocket_export_test.html`;
-const csvWriter = createObjectCsvWriter({
-  path: `error_${new Date().toJSON().slice(0, 10)}.csv`,
-  header: [
-    { id: 'url', title: 'URL' },
-    { id: 'title', title: 'Title' },
-    { id: 'selection', title: 'Selection' },
-    { id: 'folder', title: 'Folder' },
-    { id: 'timestamp', title: 'Timestamp' },
-  ]
-});
-
-// https://github.com/omnivore-app/omnivore/blob/main/packages/api/src/schema.ts
-const createArticleMutation = gql`
-  mutation CreateArticleSavingRequest($input: CreateArticleSavingRequestInput!) {
-    createArticleSavingRequest(input: $input) {
-      ... on CreateArticleSavingRequestSuccess {
-        articleSavingRequest {
-          id
-          status
+const listArticles = gql`
+  query GetSavedItems(
+    $filter: SavedItemsFilter
+    $sort: SavedItemsSort
+    $pagination: PaginationInput
+  ) {
+    user {
+      savedItems(filter: $filter, sort: $sort, pagination: $pagination) {
+        edges {
+          cursor
+          node {
+            url
+            _createdAt
+            _updatedAt
+            id
+            status
+            isFavorite
+            favoritedAt
+            isArchived
+            archivedAt
+            tags {
+              id
+              name
+            }
+            item {
+              ...ItemDetails
+              ... on Item {
+                article
+              }
+            }
+          }
         }
+        pageInfo {
+          hasNextPage
+          hasPreviousPage
+          startCursor
+          endCursor
+        }
+        totalCount
       }
-      ... on CreateArticleSavingRequestError {
-        errorCodes
+    }
+  }
+  fragment ItemDetails on Item {
+    isArticle
+    title
+    itemId
+    resolvedId
+    resolvedUrl
+    domain
+    domainMetadata {
+      name
+    }
+    excerpt
+    hasImage
+    hasVideo
+    images {
+      caption
+      credit
+      height
+      imageId
+      src
+      width
+    }
+    videos {
+      vid
+      videoId
+      type
+      src
+    }
+    topImageUrl
+    timeToRead
+    givenUrl
+    collection {
+      imageUrl
+      intro
+      title
+      excerpt
+    }
+    authors {
+      id
+      name
+      url
+    }
+    datePublished
+    syndicatedArticle {
+      slug
+      publisher {
+        name
+        url
       }
     }
   }
 `;
 
-const saveUrlMutation = gql`
-  mutation saveUrl($input: SaveUrlInput!) {
-    saveUrl(input: $input) {
+const savePageMutation = gql`
+  mutation savePage($input: SavePageInput!) {
+    savePage(input: $input) {
       ... on SaveSuccess {
         url
         clientRequestId
@@ -59,194 +114,135 @@ const saveUrlMutation = gql`
   }
 `;
 
-const createArchiveMutation = gql`
-  mutation SetLinkArchived($input: ArchiveLinkInput!) {
-    setLinkArchived(input: $input) {
-      ... on ArchiveLinkSuccess {
-        linkId
-        message
-      }
-      ... on ArchiveLinkError {
-          message
-        errorCodes
-      }
+const POCKET_GRAPHQL_URL = `https://getpocket.com/graphql?consumer_key=${process.env.POCKET_CONSUMER_KEY}&enable_cors=1`;
+const OMNIVORE_API_URL = "https://api-prod.omnivore.app/api/graphql";
+
+async function main() {
+  const pocketClient = new GraphQLClient(POCKET_GRAPHQL_URL, {
+    headers: {
+      "Content-Type": "application/json",
+      "Cookie": process.env.POCKET_COOKIE,
     }
-  }
-`;
+  });
 
-let inH1 = false;
-let inUl = false;
-let inLi = false;
-let inUnread = false;
-let inArchive = false;
-let currentText = "";
-let currentImport = null;
-
-const parserStream = new WritableStream({
-  onopentagname(tagname) {
-    currentText = "";
-
-    if (tagname === "h1") {
-      inH1 = true;
-    } else if (tagname === "ul") {
-      inUl = true;
-    } else if (tagname === "li" && inUl) {
-      inLi = true;
-    }
-  },
-  onopentag(tagname, attributes) {
-    if (tagname === "a" && inLi) {
-      currentImport = {
-        url: attributes.href,
-        title: null,
-        tags: labelsFromTags(attributes.tags),
-        timestamp: attributes.time_added
-      }
-    }
-  },
-  ontext(text) {
-    currentText = currentText.concat(text);
-  },
-  onclosetag(tagname) {
-    if (tagname === "h1") {
-      if (inH1) {
-        inH1 = false;
-        if (currentText == "Unread") {
-          inUnread = true;
-        } else if (currentText === "Read Archive") {
-          inArchive = true;
-        } else {
-          console.error(`Encountered unknown list: ${currentText}`);
-        }
-      }
-    } else if (tagname === "ul") {
-      inUl = false;
-      inUnread = false;
-      inArchive = false;
-    } else if (tagname === "li" && inUl) {
-      inLi = false;
-    } else if (tagname === "a" && inLi) {
-      currentImport.title = currentText;
-      addArticle(currentImport);
-    }
-
-    currentText = "";
-  },
-});
-
-function labelsFromTags(tags) {
-  let labels = (tags === "") ? [] : tags.split(",");
-  if (process.env.GLOBAL_IMPORT_LABELS !== "") {
-    labels = labels.concat(process.env.GLOBAL_IMPORT_LABELS.split(","));
-  }
-  return labels;
-}
-
-async function addArticle(entry: ImportItem) {
-  if (!inArchive) {
-    return
-  }
-  const client = new GraphQLClient(OMNIVORE_API_URL, {
+  const omniClient = new GraphQLClient(OMNIVORE_API_URL, {
     headers: {
       authorization: process.env.OMNIVORE_API_KEY,
       "content-type": "application/json"
     },
   });
-  /*
-  const response = await client.request(saveUrlMutation, {
-    "input": {
-      "clientRequestId": "85282635-4DF4-4BFC-A3D4-B3A004E57067",
-      "source": "api",
-      "url": entry.url
-    }
-  });
-  const response = await client.request(createArticleMutation, {
-    input: {
-      url: entry.url
-    }
-  });
- */
-  const response = await client.request(saveUrlMutation, {
-    input: {
-      url: entry.url,
-      clientRequestId: uuidv4(),
-      labels: entry.tags.map(tag => ({name: tag})),
-      source: 'api'
-    },
-  });
-  console.log("-->", entry);
-  console.log(response);
-}
 
-async function processHtml() {
-  const records: ImportItem[] = [];
-  const parser = fs.createReadStream(POCKET_HTML_EXPORT_PATH).pipe(parserStream);
+  let pageInfo: {
+    hasNextPage: boolean,
+    hasPreviousPage: boolean,
+    startCursor: string,
+    endCursor: string
+  };
+  let currentPage: object[];
 
-  await finished(parser);
-  return records;
-}
+  const getNextPage = () => {
+    return pocketClient.request(listArticles, {
+      filter: {
+        statuses: ["UNREAD", "ARCHIVED"],
+      },
+      sort: {
+        sortBy: "CREATED_AT",
+        sortOrder: "DESC"
+      },
+      pagination: pageInfo ? {
+        after: pageInfo.endCursor
+      } : null
+    });
+  };
 
-async function main() {
-  if (!process.env.OMNIVORE_AUTH_COOKIE) {
-    throw new Error(
-      "No auth token found. Did you forget to add it to the .env file?"
-    );
-  }
-
-  const client = new GraphQLClient(OMNIVORE_API_URL, {
-    headers: {
-      Cookie: `auth=${process.env.OMNIVORE_AUTH_COOKIE};`,
-    },
-  });
-
-  const entries = await processHtml();
-  let addedEntriesCount = 0;
-  let archivedEntriesCount = 0;
-  let failedEntriesCount = 0;
-
-  const failedEntries: ImportItem[] = [];
-
-  console.log(`Adding ${entries.length} links to Omnivore..`);
-  return;
-
-  for (const entry of entries) {
-    try {
-      const response = await client.request(createArticleMutation, {
-        input: { url: entry.url },
-      });
-      addedEntriesCount++;
-
-      var result = response;
-      if (entry.folder == "Archive") {
-        await client.request(createArchiveMutation, {
-          input: { linkId: result.createArticleSavingRequest.articleSavingRequest.id, archived: true },
-        });
-        archivedEntriesCount++;
+  const readArticles = new Readable({
+    objectMode: true,
+    async read(_size) {
+      if (!pageInfo || pageInfo.hasNextPage && currentPage.length === 0) {
+        ({ user: { savedItems: { pageInfo, edges: currentPage }}} = await getNextPage());
       }
 
-    } catch (error) {
-      console.error(`🚫 Failed to add ${entry.url}`);
-      failedEntries.push({
-        url: entry.url,
-        title: entry.title,
-        selection: entry.selection,
-        folder: entry.folder,
-        timestamp: entry.timestamp
-      })
-
-      failedEntriesCount++;
+      if (currentPage.length > 0) {
+        this.push(currentPage.shift());
+      } else {
+        this.push(null);
+      }
     }
-  }
+  });
 
-  console.log(
-    `Successfully added ${addedEntriesCount} (Archived: ${archivedEntriesCount}) of ${entries.length} links!`
-  );
+  const failedEntries: object[] = [];
 
-  if (failedEntriesCount > 0) {
+  const labelsForArticle = ({ tags, isFavorite }) => {
+    const labels = tags.map((tag:string) => ({name: tag}));
+    if (isFavorite && process.env.FAVORITE_LABEL) {
+      labels.push(process.env.FAVORITE_LABEL);
+    }
+    if (process.env.GLOBAL_IMPORT_LABEL) {
+      labels.push(process.env.GLOBAL_IMPORT_LABEL);
+    }
+    return labels;
+  };
+
+  const writeToOmnivore = new Writable({
+    objectMode: true,
+    async write(article, _encoding, callback) {
+      const { node: { tags, _createdAt, isArchived, item } } = article;
+      const labels = labelsForArticle(article);
+
+      console.log(`Saving "${item.title}" (${item.givenUrl})`);
+
+      await omniClient.request(savePageMutation, {
+        input: {
+          url: item.givenUrl,
+          clientRequestId: uuidv4(),
+          title: item.title,
+          originalContent: item.article,
+          savedAt: new Date(_createdAt * 1000),
+          publishedAt: new Date(item.datePublished),
+          // The server barfs if sent an empty array, so work around that
+          labels: labels.length > 0 ? labels : null,
+          source: "api",
+          state: isArchived ? "ARCHIVED" : "SUCCEEDED"
+        },
+      }).catch((error) => {
+        console.log("Failed!", error);
+        failedEntries.push({
+          url: item.givenUrl,
+          title: item.title,
+          tags: tags.join(","),
+          timestamp: _createdAt
+        });
+      });
+
+      callback(null);
+    }
+  });
+
+  const handleErrors = () => {
+    if (failedEntries.length === 0) {
+      return;
+    }
+
+    const csvWriter = createObjectCsvWriter({
+      path: `error_${new Date().toJSON().slice(0, 10)}.csv`,
+      header: [
+        { id: 'url', title: 'URL' },
+        { id: 'title', title: 'Title' },
+        { id: 'tags', title: 'Tags' },
+        { id: 'timestamp', title: 'Timestamp' },
+      ]
+    });
+
     csvWriter
       .writeRecords(failedEntries)
-      .then(() => console.log('The CSV file was written successfully'));
-  }
+      .then(() => console.log('Errors written to CSV file.'));
+  };
+
+  readArticles.pipe(writeToOmnivore);
+  await finished(writeToOmnivore);
+
+  console.log("Import finished.");
+  handleErrors();
 }
 
 main();

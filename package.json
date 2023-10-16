@@ -1,11 +1,10 @@
 {
-  "name": "instapaper-to-omnivore",
-  "version": "1.0.0",
+  "name": "pocket-to-omnivore",
+  "version": "0.1.0",
   "description": "",
   "main": "index.js",
   "scripts": {
     "import": "npx babel-node -x .ts index.ts",
-    "import-permanent": "npx babel-node -x .ts import-permanent.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
