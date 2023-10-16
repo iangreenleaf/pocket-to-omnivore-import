@@ -143,7 +143,7 @@ async function main() {
   const getNextPage = () => {
     return pocketClient.request(listArticles, {
       filter: {
-        statuses: ["UNREAD"],
+        statuses: ["UNREAD", "ARCHIVED"],
       },
       sort: {
         sortBy: "CREATED_AT",
@@ -172,12 +172,22 @@ async function main() {
 
   const failedEntries: object[] = [];
 
-  //TODO figure out archived favorited etc
+  const labelsForArticle = ({ tags, isFavorite }) => {
+    const labels = tags.map((tag:string) => ({name: tag}));
+    if (isFavorite && process.env.FAVORITE_LABEL) {
+      labels.push(process.env.FAVORITE_LABEL);
+    }
+    if (process.env.GLOBAL_IMPORT_LABEL) {
+      labels.push(process.env.GLOBAL_IMPORT_LABEL);
+    }
+    return labels;
+  };
+
   const writeToOmnivore = new Writable({
     objectMode: true,
     async write(article, _encoding, callback) {
-      const { node: { tags, _createdAt, item } } = article;
-      const labels = tags.map((tag:string) => ({name: tag}));
+      const { node: { tags, _createdAt, isArchived, item } } = article;
+      const labels = labelsForArticle(article);
 
       console.log(`Saving "${item.title}" (${item.givenUrl})`);
 
@@ -191,7 +201,8 @@ async function main() {
           publishedAt: new Date(item.datePublished),
           // The server barfs if sent an empty array, so work around that
           labels: labels.length > 0 ? labels : null,
-          source: 'api',
+          source: "api",
+          state: isArchived ? "ARCHIVED" : "SUCCEEDED"
         },
       }).catch((error) => {
         console.log("Failed!", error);
