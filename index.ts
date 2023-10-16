@@ -187,13 +187,14 @@ async function main() {
 
   const failedEntries: object[] = [];
 
-  const labelsForArticle = ({ tags, isFavorite }) => {
-    const labels = tags.map((tag:string) => ({name: tag}));
+  type PocketTag = { id: string, name: string }
+  const labelsForArticle = (tags: PocketTag[], isFavorite: boolean) => {
+    const labels = tags.map(({ name }) => ({ name }));
     if (isFavorite && process.env.FAVORITE_LABEL) {
-      labels.push(process.env.FAVORITE_LABEL);
+      labels.push({name: process.env.FAVORITE_LABEL});
     }
     if (process.env.GLOBAL_IMPORT_LABEL) {
-      labels.push(process.env.GLOBAL_IMPORT_LABEL);
+      labels.push({name: process.env.GLOBAL_IMPORT_LABEL});
     }
     return labels;
   };
@@ -201,8 +202,8 @@ async function main() {
   const writeToOmnivore = new Writable({
     objectMode: true,
     async write(article, _encoding, callback) {
-      const { node: { tags, _createdAt, isArchived, item } } = article;
-      const labels = labelsForArticle(article);
+      const { node: { tags, _createdAt, isArchived, isFavorite, item } } = article;
+      const labels = labelsForArticle(tags, isFavorite);
 
       console.log(`Saving "${item.title}" (${item.givenUrl})`);
 
