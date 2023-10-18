@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import { Readable, Writable } from "stream";
 import { finished } from "stream/promises";
 import { createObjectCsvWriter } from "csv-writer"
+import { backOff } from "exponential-backoff";
 
 const listArticles = gql`
   query GetSavedItems(
@@ -155,8 +156,24 @@ async function main() {
     }
   };
 
+  /**
+   * Sorta dumb function that holds each request for a minimum of 5 seconds,
+   * used to artificially slow down requests to the Pocket API
+   */
+  const rateLimit: <T>(promise: Promise<T>) => Promise<T> = (promise) => {
+    return Promise.all([
+      promise,
+      new Promise(resolve => { setTimeout(resolve, 5000); })
+    ]).then(resolved => resolved[0])
+  }
+
+  /**
+   * Makes a request to the Pocket API for the next page of results.
+   * Rate limited to not trip their blocks, and uses exponential backoff
+   * to retry requests in the case of failures.
+   */
   const getNextPage: () => Promise<ListArticlesResponse> = () => {
-    return pocketClient.request(listArticles, {
+    return rateLimit(backOff(() => pocketClient.request(listArticles, {
       filter: {
         statuses: ["UNREAD", "ARCHIVED"],
       },
@@ -167,7 +184,7 @@ async function main() {
       pagination: pageInfo ? {
         after: pageInfo.endCursor
       } : null
-    });
+    })));
   };
 
   const readArticles = new Readable({

@@ -12,6 +12,7 @@
   "dependencies": {
     "csv-writer": "^1.6.0",
     "dotenv": "^16.0.0",
+    "exponential-backoff": "^3.1.1",
     "graphql": "^16.8.1",
     "graphql-request": "^6.1.0",
     "htmlparser2": "^9.0.0",
