@@ -144,6 +144,7 @@ async function main() {
 
   const readArticles = new Readable({
     objectMode: true,
+    highWaterMark: 90,
     async read(_size) {
       if (!pageInfo || pageInfo.hasNextPage && currentPage.length === 0) {
         ({ user: { savedItems: { pageInfo, edges: currentPage }}} = await getNextPage());
