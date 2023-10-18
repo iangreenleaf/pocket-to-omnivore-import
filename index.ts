@@ -175,34 +175,43 @@ async function main() {
   const writeToOmnivore = new Writable({
     objectMode: true,
     async write(article, _encoding, callback) {
-      const { node: { tags, _createdAt, isArchived, isFavorite, item } } = article;
-      const labels = labelsForArticle(tags, isFavorite);
+      try {
+        const { node: { tags, _createdAt, isArchived, isFavorite, item } } = article;
+        const labels = labelsForArticle(tags, isFavorite);
 
-      console.log(`Saving "${item.title}" (${item.givenUrl})`);
+        console.log(`Saving "${item.title}" (${item.givenUrl})`);
 
-      await omniClient.request(savePageMutation, {
-        input: {
-          url: item.givenUrl,
-          clientRequestId: uuidv4(),
-          title: item.title,
-          originalContent: item.article,
-          savedAt: new Date(_createdAt * 1000),
-          publishedAt: new Date(item.datePublished),
-          // The server barfs if sent an empty array, so work around that
-          labels: labels.length > 0 ? labels : null,
-          source: "api",
-          state: isArchived ? "ARCHIVED" : "SUCCEEDED"
-        },
-      }).catch((error) => {
-        console.log("Failed!", error);
-        failedEntries.push({
-          url: item.givenUrl,
-          title: item.title,
-          tags: tags.join(","),
-          timestamp: _createdAt
+        await backOff(() => omniClient.request(savePageMutation, {
+          input: {
+            url: item.givenUrl,
+            clientRequestId: uuidv4(),
+            title: item.title,
+            originalContent: item.article,
+            savedAt: new Date(_createdAt * 1000),
+            publishedAt: new Date(item.datePublished),
+            // The server barfs if sent an empty array, so work around that
+            labels: labels.length > 0 ? labels : null,
+            source: "api",
+            state: isArchived ? "ARCHIVED" : "SUCCEEDED"
+          },
+        })).catch((error) => {
+          console.log("Failed!", error);
+          failedEntries.push({
+            url: item.givenUrl,
+            title: item.title,
+            tags: tags.join(","),
+            timestamp: _createdAt
+          });
         });
-      });
 
+      } catch (err) {
+        failedEntries.push({
+          url: article?.node?.item?.givenUrl,
+          title: article?.node?.item?.title,
+          tags: article?.node?.tags.join(","),
+          timestamp: article?.node?._createdAt
+        });
+      }
       callback(null);
     }
   });
