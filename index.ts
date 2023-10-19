@@ -188,6 +188,10 @@ async function main() {
         const { node: { tags, _createdAt, isArchived, isFavorite, item } } = article;
         const labels = labelsForArticle(tags, isFavorite);
 
+        if (!item?.givenUrl) {
+          throw new Error("Empty object returned from Pocket");
+        }
+
         logTruncated(`${progress()} Saving "${item.title}" (${item.givenUrl})`);
 
         await backOff(() => omniClient.request(savePageMutation, {
