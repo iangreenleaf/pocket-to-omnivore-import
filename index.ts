@@ -96,6 +96,8 @@ async function main() {
     endCursor: string
   };
   let currentPage: object[];
+  let totalCount: number;
+  let currentCount = 0;
 
   type ListArticlesResponse = {
     user: {
@@ -136,7 +138,7 @@ async function main() {
     highWaterMark: 60,
     async read(_size) {
       if (!pageInfo || pageInfo.hasNextPage && currentPage.length === 0) {
-        ({ user: { savedItems: { pageInfo, edges: currentPage }}} = await getNextPage());
+        ({ user: { savedItems: { pageInfo, edges: currentPage, totalCount }}} = await getNextPage());
       }
 
       if (currentPage.length > 0) {
@@ -161,14 +163,23 @@ async function main() {
     return labels;
   };
 
+  const progress = () => {
+    // The Pocket API seems to report 5000 when the actual total is any higher than that
+    const max = totalCount === 5000 ? "5000+" : `${totalCount}`;
+    const curr = currentCount.toString().padStart(totalCount.toString().length, " ");
+    return `(${curr}/${max})`
+  };
+
   const writeToOmnivore = new Writable({
     objectMode: true,
     async write(article, _encoding, callback) {
       try {
+        currentCount++;
+
         const { node: { tags, _createdAt, isArchived, isFavorite, item } } = article;
         const labels = labelsForArticle(tags, isFavorite);
 
-        console.log(`Saving "${item.title}" (${item.givenUrl})`);
+        console.log(`${progress()} Saving "${item.title}" (${item.givenUrl})`);
 
         await backOff(() => omniClient.request(savePageMutation, {
           input: {
