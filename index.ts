@@ -5,6 +5,7 @@ import { Readable, Writable } from "stream";
 import { finished } from "stream/promises";
 import { createObjectCsvWriter } from "csv-writer"
 import { backOff } from "exponential-backoff";
+import highland from "highland";
 
 const listArticles = gql`
   query GetSavedItems(
@@ -112,23 +113,11 @@ async function main() {
   };
 
   /**
-   * Sorta dumb function that holds each request for a minimum of 5 seconds,
-   * used to artificially slow down requests to the Pocket API
-   */
-  const rateLimit: <T>(promise: Promise<T>) => Promise<T> = (promise) => {
-    return Promise.all([
-      promise,
-      new Promise(resolve => { setTimeout(resolve, 5000); })
-    ]).then(resolved => resolved[0])
-  }
-
-  /**
    * Makes a request to the Pocket API for the next page of results.
-   * Rate limited to not trip their blocks, and uses exponential backoff
-   * to retry requests in the case of failures.
+   * Uses exponential backoff to retry requests in the case of failures.
    */
   const getNextPage: () => Promise<ListArticlesResponse> = () => {
-    return rateLimit(backOff(() => pocketClient.request(listArticles, {
+    return backOff(() => pocketClient.request(listArticles, {
       filter: {
         statuses: ["UNREAD", "ARCHIVED"],
       },
@@ -139,12 +128,12 @@ async function main() {
       pagination: pageInfo ? {
         after: pageInfo.endCursor
       } : null
-    })));
+    }));
   };
 
   const readArticles = new Readable({
     objectMode: true,
-    highWaterMark: 90,
+    highWaterMark: 60,
     async read(_size) {
       if (!pageInfo || pageInfo.hasNextPage && currentPage.length === 0) {
         ({ user: { savedItems: { pageInfo, edges: currentPage }}} = await getNextPage());
@@ -236,7 +225,9 @@ async function main() {
       .then(() => console.log('Errors written to CSV file.'));
   };
 
-  readArticles.pipe(writeToOmnivore);
+  // We rate limit to respect Omnivore's API limits.
+  // As a side effect, backpressure from this should also keep us in Pocket's good graces.
+  highland(readArticles).ratelimit(100, 60 * 1000).pipe(writeToOmnivore);
   await finished(writeToOmnivore);
 
   console.log("Import finished.");
