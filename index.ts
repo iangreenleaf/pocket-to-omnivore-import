@@ -170,6 +170,15 @@ async function main() {
     return `(${curr}/${max})`
   };
 
+  const logTruncated = (msg: string) => {
+    const cols = process.stdout.columns;
+    if (cols && msg.length > cols) {
+      console.log(msg.slice(0, process.stdout.columns - 1).concat("…"));
+    } else {
+      console.log(msg);
+    }
+  }
+
   const writeToOmnivore = new Writable({
     objectMode: true,
     async write(article, _encoding, callback) {
@@ -179,7 +188,7 @@ async function main() {
         const { node: { tags, _createdAt, isArchived, isFavorite, item } } = article;
         const labels = labelsForArticle(tags, isFavorite);
 
-        console.log(`${progress()} Saving "${item.title}" (${item.givenUrl})`);
+        logTruncated(`${progress()} Saving "${item.title}" (${item.givenUrl})`);
 
         await backOff(() => omniClient.request(savePageMutation, {
           input: {
