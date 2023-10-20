@@ -251,7 +251,7 @@ async function main() {
 
   // We rate limit to respect Omnivore's API limits.
   // As a side effect, backpressure from this should also keep us in Pocket's good graces.
-  highland(readArticles).ratelimit(100, 60 * 1000).pipe(writeToOmnivore);
+  highland(readArticles).ratelimit(60, 60 * 1000).pipe(writeToOmnivore);
   await finished(writeToOmnivore);
 
   console.log("Import finished.");
